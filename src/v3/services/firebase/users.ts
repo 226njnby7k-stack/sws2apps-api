@@ -1,9 +1,9 @@
 import { getAuth } from 'firebase-admin/auth';
-import { getStorage } from 'firebase-admin/storage';
 import { LogLevel } from '@logtail/types';
 import { StandardRecord } from '../../definition/app.js';
 import { PocketNewParams, UserNewParams, UserProfile, UserSession, UserSettings } from '../../definition/user.js';
 import { getFileFromStorage, getFileMetadata, uploadFileToStorage } from './storage_utils.js';
+import { listObjects } from '../storage/disk.js';
 import { User } from '../../classes/User.js';
 import { encryptData } from '../encryption/encryption.js';
 import { schemaUserProfile } from '../../definition/schema.js';
@@ -26,7 +26,7 @@ export const getUserAuthDetails = async (auth_uid: string) => {
 export const getUsersID = async () => {
 	const pattern = '^v3\\/users\\/(.+?)\\/';
 
-	const [files] = await getStorage().bucket().getFiles({ prefix: 'v3/users' });
+	const files = await listObjects('v3/users');
 
 	const draftUsers = files.filter((file) => {
 		const rgExp = new RegExp(pattern, 'g');

@@ -5,6 +5,9 @@ cong_backup
 **/S-34/*.json
 .idx
 
+# self-hosted local datastore (encrypted blobs)
+/storage/
+
 # dependencies
 /node_modules
 /.pnp

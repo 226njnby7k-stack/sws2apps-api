@@ -1,4 +1,3 @@
-import { getStorage } from 'firebase-admin/storage';
 import randomstring from 'randomstring';
 import { LogLevel } from '@logtail/types';
 import { StandardRecord } from '../../definition/app.js';
@@ -10,6 +9,7 @@ import {
 	UserRequestAccess,
 } from '../../definition/congregation.js';
 import { deleteFileFromStorage, getFileFromStorage, getFileMetadata, uploadFileToStorage } from './storage_utils.js';
+import { listObjects, readObject } from '../storage/disk.js';
 import { CongregationsList } from '../../classes/Congregations.js';
 import { decryptData, encryptData } from '../encryption/encryption.js';
 import { Congregation } from '../../classes/Congregation.js';
@@ -18,7 +18,7 @@ import { logger } from '../logger/logger.js';
 export const getCongsID = async () => {
 	const pattern = '^v3\\/congregations\\/(.+?)\\/';
 
-	const [files] = await getStorage().bucket().getFiles({ prefix: 'v3/congregations' });
+	const files = await listObjects('v3/congregations');
 
 	const draftCongs = files.filter((file) => {
 		const rgExp = new RegExp(pattern, 'g');
@@ -37,14 +37,15 @@ export const getCongsID = async () => {
 };
 
 export const getCongPersons = async (cong_id: string) => {
-	const storageBucket = getStorage().bucket();
-	const [files] = await storageBucket.getFiles({ prefix: `v3/congregations/${cong_id}/persons` });
+	const files = await listObjects(`v3/congregations/${cong_id}/persons`);
 
 	const cong_persons: StandardRecord[] = [];
 
 	for await (const file of files) {
-		const contents = await file.download();
-		const person = decryptData(contents.toString())!;
+		const encrypted = await readObject(file.name);
+		if (encrypted === undefined) continue;
+
+		const person = decryptData(encrypted)!;
 
 		cong_persons.push(JSON.parse(person));
 	}
@@ -91,15 +92,16 @@ export const getOutgoingSpeakersAccessList = async (congId: string) => {
 };
 
 export const getApplications = async (cong_id: string) => {
-	const storageBucket = getStorage().bucket();
-	const [files] = await storageBucket.getFiles({ prefix: `v3/congregations/${cong_id}/auxiliary_applications` });
+	const files = await listObjects(`v3/congregations/${cong_id}/auxiliary_applications`);
 
 	const applications: StandardRecord[] = [];
 
 	for await (const file of files) {
 		if (file.name.includes('.txt')) {
-			const contents = await file.download();
-			const application = decryptData(contents.toString())!;
+			const encrypted = await readObject(file.name);
+			if (encrypted === undefined) continue;
+
+			const application = decryptData(encrypted)!;
 			applications.push(JSON.parse(application));
 		}
 	}
@@ -121,8 +123,7 @@ export const getCongDetails = async (cong_id: string) => {
 };
 
 export const getPersonsMetadata = async (cong_id: string) => {
-	const storageBucket = getStorage().bucket();
-	const [files] = await storageBucket.getFiles({ prefix: `v3/congregations/${cong_id}/persons` });
+	const files = await listObjects(`v3/congregations/${cong_id}/persons`);
 
 	const dates: string[] = [];
 

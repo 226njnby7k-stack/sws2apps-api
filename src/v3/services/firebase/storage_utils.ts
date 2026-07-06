@@ -1,96 +1,61 @@
-import { getStorage } from 'firebase-admin/storage';
+/**
+ * storage_utils.ts — self-hosted fork.
+ *
+ * DROP-IN REPLACEMENT for src/v3/services/firebase/storage_utils.ts.
+ * Same four exported functions, same signatures, same semantics — but backed
+ * by the local disk adapter instead of a Firebase Cloud Storage bucket.
+ *
+ * Callers (users.ts, congregations.ts, api.ts, classes/*) need NO changes for
+ * these four functions. Only metadata.updated and metadata.timeCreated are
+ * preserved because they are the only metadata fields upstream code ever reads.
+ */
+
 import { StorageBaseType } from '../../definition/firebase.js';
 import { decryptData, encryptData } from '../encryption/encryption.js';
+import { deleteObjectsByPrefix, readObject, saveObject, statObject } from '../storage/disk.js';
 
-export const uploadFileToStorage = async (data: string, options: StorageBaseType) => {
-	const { path, type } = options;
-
+const buildDestPath = ({ path, type }: StorageBaseType): string => {
 	let destPath = 'v3/';
 
-	if (type === 'congregation') {
-		destPath += `congregations/${path}`;
-	}
+	if (type === 'congregation') destPath += `congregations/${path}`;
+	if (type === 'user') destPath += `users/${path}`;
+	if (type === 'api') destPath += `api/${path}`;
 
-	if (type === 'user') {
-		destPath += `users/${path}`;
-	}
+	return destPath;
+};
 
-	if (type === 'api') {
-		destPath += `api/${path}`;
-	}
-
-	const storageBucket = getStorage().bucket();
-	const file = storageBucket.file(destPath);
+export const uploadFileToStorage = async (data: string, options: StorageBaseType) => {
+	const destPath = buildDestPath(options);
 
 	const encryptedData = encryptData(data);
-
-	await file.save(encryptedData, { metadata: { contentType: 'text/plain' } });
+	await saveObject(destPath, encryptedData);
 
 	return encryptedData;
 };
 
-export const getFileMetadata = async ({ path, type }: StorageBaseType) => {
-	let destPath = 'v3/';
+export const getFileMetadata = async (options: StorageBaseType) => {
+	// upstream quirk preserved: this function never handled type 'api'
+	if (options.type === 'api') return undefined;
 
-	if (type === 'congregation') {
-		destPath += `congregations/${path}`;
-	}
-
-	if (type === 'user') {
-		destPath += `users/${path}`;
-	}
-
-	const storageBucket = getStorage().bucket();
-	const file = await storageBucket.file(destPath);
-
-	const [fileExist] = await file.exists();
-
-	if (fileExist) {
-		return file.metadata;
-	}
+	const destPath = buildDestPath(options);
+	return await statObject(destPath);
 };
 
-export const getFileFromStorage = async ({ path, type }: StorageBaseType) => {
-	let destPath = 'v3/';
+export const getFileFromStorage = async (options: StorageBaseType) => {
+	const destPath = buildDestPath(options);
 
-	if (type === 'congregation') {
-		destPath += `congregations/${path}`;
-	}
+	const encryptedData = await readObject(destPath);
+	if (encryptedData === undefined) return undefined;
 
-	if (type === 'user') {
-		destPath += `users/${path}`;
-	}
-
-	if (type === 'api') {
-		destPath += `api/${path}`;
-	}
-
-	const storageBucket = getStorage().bucket();
-	const file = await storageBucket.file(destPath);
-
-	const [fileExist] = await file.exists();
-
-	if (fileExist) {
-		const contents = await file.download();
-		const encryptedData = contents.toString();
-
-		return decryptData(encryptedData);
-	}
+	return decryptData(encryptedData);
 };
 
 export const deleteFileFromStorage = async ({ path, type }: StorageBaseType) => {
 	if (!path || path.length === 0) return;
 
 	let destPath = 'v3/';
+	if (type === 'congregation') destPath += `congregations/${path}`;
+	if (type === 'user') destPath += `users/${path}`;
 
-	if (type === 'congregation') {
-		destPath += `congregations/${path}`;
-	}
-
-	if (type === 'user') {
-		destPath += `users/${path}`;
-	}
-
-	const storageBucket = getStorage().bucket();
-	await storageBucket.deleteFiles({ prefix: destPath, force: true });
+	await deleteObjectsByPrefix(destPath);
 };

@@ -1,4 +1,3 @@
-import { getStorage } from 'firebase-admin/storage';
 import { AppRoleType, StandardRecord } from '../definition/app.js';
 import {
 	BackupData,
@@ -10,6 +9,7 @@ import {
 	UserRequestAccess,
 } from '../definition/congregation.js';
 import { decryptData } from '../services/encryption/encryption.js';
+import { listObjects, readObject } from '../services/storage/disk.js';
 import {
 	approveCongAccess,
 	deleteAPApplication,
@@ -183,14 +183,15 @@ export class Congregation {
 	}
 
 	async getPersons() {
-		const storageBucket = getStorage().bucket();
-		const [files] = await storageBucket.getFiles({ prefix: `v3/congregations/${this.id}/persons` });
+		const files = await listObjects(`v3/congregations/${this.id}/persons`);
 
 		const cong_persons: StandardRecord[] = [];
 
 		for await (const file of files) {
-			const contents = await file.download();
-			const person = decryptData(contents.toString())!;
+			const encrypted = await readObject(file.name);
+			if (encrypted === undefined) continue;
+
+			const person = decryptData(encrypted)!;
 
 			cong_persons.push(JSON.parse(person));
 		}
