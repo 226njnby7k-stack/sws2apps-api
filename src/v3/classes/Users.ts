@@ -5,7 +5,8 @@ import { User } from './User.js';
 import { CongregationsList } from './Congregations.js';
 import { createPocketUser, createUser, deleteAuthUser, loadAllUsers } from '../services/firebase/users.js';
 import { deleteFileFromStorage } from '../services/firebase/storage_utils.js';
-import { getAuth } from 'firebase-admin/auth';
+import { createIdentity, findUidByEmail } from '../services/identity/store.js';
+import { createEmailLoginToken } from '../services/identity/tokens.js';
 import { logger } from '../services/logger/logger.js';
 
 class Users {
@@ -69,12 +70,12 @@ class Users {
 		const localUser = UsersList.findByEmail(email);
 
 		if (!localUser) {
-			const results = await getAuth().getUsers([{ email }]);
+			const existingUid = await findUidByEmail(email);
 
-			if (results.users.length === 0) {
-				const user = await getAuth().createUser({ email });
+			if (!existingUid) {
+				const record = await createIdentity(email);
 
-				await this.create({ auth_uid: user.uid, firstname: '', lastname: '', email });
+				await this.create({ auth_uid: record.uid, firstname: '', lastname: '', email });
 			}
 		}
 
@@ -108,8 +109,8 @@ class Users {
 			await foundUser.updateProfile(profile);
 		}
 
-		const user = await getAuth().getUserByEmail(email);
-		const token = await getAuth().createCustomToken(user.uid);
+		const uid = (await findUidByEmail(email))!;
+		const token = await createEmailLoginToken(uid);
 
 		const link = `${origin}/#/?code=${token}`;
 

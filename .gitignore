@@ -39,3 +39,6 @@ yarn-error.log*
 *-debug.log
 
 .idea
+# self-hosted JWT signing keys (M4) — never commit
+jwt_private.pem
+jwt_public.pem

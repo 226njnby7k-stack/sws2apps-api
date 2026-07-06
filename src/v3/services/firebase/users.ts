@@ -1,9 +1,10 @@
-import { getAuth } from 'firebase-admin/auth';
 import { LogLevel } from '@logtail/types';
 import { StandardRecord } from '../../definition/app.js';
 import { PocketNewParams, UserNewParams, UserProfile, UserSession, UserSettings } from '../../definition/user.js';
 import { getFileFromStorage, getFileMetadata, uploadFileToStorage } from './storage_utils.js';
 import { listObjects } from '../storage/disk.js';
+import { deleteIdentity, getCredentials, updateIdentityEmail } from '../identity/store.js';
+import { verifyAccessToken } from '../identity/tokens.js';
 import { User } from '../../classes/User.js';
 import { encryptData } from '../encryption/encryption.js';
 import { schemaUserProfile } from '../../definition/schema.js';
@@ -11,11 +12,10 @@ import { logger } from '../logger/logger.js';
 
 export const getUserAuthDetails = async (auth_uid: string) => {
 	try {
-		const userRecord = await getAuth().getUser(auth_uid);
+		const record = await getCredentials(auth_uid);
+		if (!record) return;
 
-		const auth_provider = userRecord.providerData[0]?.providerId || 'email';
-
-		return { email: userRecord.email, auth_provider, createdAt: userRecord.metadata.creationTime };
+		return { email: record.email, auth_provider: 'email', createdAt: record.created_at };
 	} catch (error) {
 		logger(LogLevel.Warn, String(error));
 
@@ -223,7 +223,7 @@ export const loadAllUsers = async (batchSize = 20) => {
 };
 
 export const setUserEmail = async (auth_uid: string, email: string) => {
-	await getAuth().updateUser(auth_uid, { email });
+	await updateIdentityEmail(auth_uid, email);
 };
 
 export const setUserProfile = async (id: string, profile: UserProfile) => {
@@ -249,7 +249,7 @@ export const setUserSessions = async (id: string, sessions: UserSession[]) => {
 
 export const createUser = async (params: UserNewParams) => {
 	if (params.email) {
-		await getAuth().updateUser(params.auth_uid, { email: params.email });
+		await updateIdentityEmail(params.auth_uid, params.email);
 	}
 
 	const id = crypto.randomUUID().toUpperCase();
@@ -297,17 +297,12 @@ export const createPocketUser = async ({
 };
 
 export const decodeUserIdToken = async (token: string) => {
-	try {
-		const decodedToken = await getAuth().verifyIdToken(token);
-		return decodedToken.uid;
-	} catch (err) {
-		console.error('Failed to decode idToken', err);
-	}
+	return await verifyAccessToken(token);
 };
 
 export const deleteAuthUser = async (uid: string) => {
 	try {
-		await getAuth().deleteUser(uid);
+		await deleteIdentity(uid);
 	} catch (error) {
 		console.error('Failed to delete auth user', error);
 	}

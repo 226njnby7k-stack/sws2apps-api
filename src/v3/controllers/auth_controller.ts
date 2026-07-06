@@ -1,5 +1,4 @@
 import { Request, Response } from 'express';
-import { getAuth } from 'firebase-admin/auth';
 import { validationResult } from 'express-validator';
 import { generateTokenDev } from '../dev/setup.js';
 import { UsersList } from '../classes/Users.js';
@@ -8,11 +7,37 @@ import { retrieveVisitorDetails } from '../services/ip_details/auth_utils.js';
 import { CongregationsList } from '../classes/Congregations.js';
 import { formatError } from '../utils/format_log.js';
 import { decodeUserIdToken } from '../services/firebase/users.js';
+import { consumeEmailLoginToken, createEmailLoginToken, issueAccessToken } from '../services/identity/tokens.js';
+import { findUidByEmail, getCredentials } from '../services/identity/store.js';
+import { verifyPassword } from '../services/identity/passwords.js';
 import { cookieOptions } from '../utils/app.js';
 import { ROLE_MASTER_KEY } from '../constant/base.js';
 import { MailClient } from '../config/mail_config.js';
 
 const isDev = process.env.NODE_ENV === 'development';
+
+// Origins we are willing to embed in an outgoing passwordless login email.
+// The request Origin header is attacker-controlled on an unauthenticated
+// endpoint, so it must never be trusted verbatim — otherwise the real service
+// would email a victim a login link (carrying a one-time code) pointing at an
+// attacker domain. We validate against this allowlist and fall back to the
+// canonical app origin when the request origin is not allowed.
+const APP_ORIGIN_ALLOWLIST = [
+	'https://organized-app.com',
+	'https://staging.organized-app.com',
+	...(process.env.APP_ORIGIN ? [process.env.APP_ORIGIN] : []),
+];
+
+const CANONICAL_APP_ORIGIN = process.env.APP_ORIGIN || 'https://organized-app.com';
+
+const resolveAppOrigin = (requestOrigin: string | undefined): string => {
+	if (requestOrigin) {
+		if (APP_ORIGIN_ALLOWLIST.includes(requestOrigin)) return requestOrigin;
+		if (isDev && /^https?:\/\/localhost(:\d+)?$/.test(requestOrigin)) return requestOrigin;
+	}
+
+	return CANONICAL_APP_ORIGIN;
+};
 
 export const loginUser = async (req: Request, res: Response) => {
 	const userIP = req.clientIp!;
@@ -50,18 +75,7 @@ export const loginUser = async (req: Request, res: Response) => {
 	}
 
 	if (!authUser) {
-		const userRecord = await getAuth().getUser(uid);
-		const displayName = userRecord.displayName || userRecord.providerData[0].displayName;
-		let firstname = '';
-		let lastname = '';
-
-		if (displayName.length > 0) {
-			const names = displayName.split(' ');
-			lastname = names.pop()!;
-			firstname = names.join(' ');
-		}
-
-		authUser = await UsersList.create({ auth_uid: uid, firstname, lastname });
+		authUser = await UsersList.create({ auth_uid: uid, firstname: '', lastname: '' });
 	}
 
 	const newSession: UserSession = {
@@ -165,7 +179,8 @@ export const createSignInLink = async (req: Request, res: Response) => {
 	const { email } = req.body;
 	const language = (req.headers?.applanguage as string) || 'eng';
 
-	const { link, otp } = await UsersList.generatePasswordLessLink({ email, origin: req.headers.origin! });
+	const origin = resolveAppOrigin(req.headers.origin);
+	const { link, otp } = await UsersList.generatePasswordLessLink({ email, origin });
 
 	const MAIL_ENABLED = process.env.MAIL_ENABLED === 'true';
 
@@ -387,7 +402,7 @@ export const verifyEmailToken = async (req: Request, res: Response) => {
 		newSessions = authUser.sessions?.filter((session) => session.visitorid !== visitorid) || [];
 	}
 	const newSession: UserSession = {
-		mfaVerified: true,
+		mfaVerified: !authUser.profile.mfa_enabled,
 		last_seen: new Date().toISOString(),
 		visitorid: visitorid,
 		visitor_details: await retrieveVisitorDetails(userIP, req),
@@ -397,6 +412,31 @@ export const verifyEmailToken = async (req: Request, res: Response) => {
 	newSessions.push(newSession);
 
 	await authUser.updateSessions(newSessions);
+
+	// MFA gate: with TOTP 2FA enabled, the emailed OTP alone is not sufficient.
+	// Return the SAME MFA_VERIFY signal /user-login uses so the client routes to
+	// the existing verify-MFA screen (no new step). The one-time login code is
+	// included because the email flow acquires its access token here — the client
+	// exchanges it for a JWT, then calls /mfa/verify-token to clear the gate.
+	// NOTE: upstream sets mfaVerified:true here unconditionally (no TOTP gate);
+	// this gate is our divergence — see PROJECT.md session log.
+	if (authUser.profile.mfa_enabled) {
+		res.locals.type = 'info';
+		res.locals.message = 'user required to verify mfa';
+
+		res.cookie('visitorid', visitorid, cookieOptions(req));
+
+		const customToken = await createEmailLoginToken(authUser.profile.auth_uid!);
+
+		if (isDev) {
+			const tokenDev = generateTokenDev(authUser.email!, authUser.profile.secret!);
+			res.status(200).json({ message: 'MFA_VERIFY', code: tokenDev, custom_token: customToken });
+		} else {
+			res.status(200).json({ message: 'MFA_VERIFY', custom_token: customToken });
+		}
+
+		return;
+	}
 
 	const userInfo: UserAuthResponse = {
 		message: 'TOKEN_VALID',
@@ -449,10 +489,124 @@ export const verifyEmailToken = async (req: Request, res: Response) => {
 	res.locals.type = 'info';
 	res.locals.message = 'user successfully logged with email OTP';
 
-	const customToken = await getAuth().createCustomToken(authUser.profile.auth_uid!);
+	// Return a one-time login code (not a JWT directly) so the client's single
+	// userSignInCustomToken() path is uniform: both the email-link and OTP flows
+	// hand a one-time code to /token-login, which exchanges it for an access JWT.
+	const customToken = await createEmailLoginToken(authUser.profile.auth_uid!);
 
 	userInfo.custom_token = customToken;
 
 	res.cookie('visitorid', visitorid, cookieOptions(req));
 	res.status(200).json(userInfo);
+};
+
+// A valid argon2id hash of a throwaway value. Verifying against it when no
+// account exists equalizes response time with the real path, so a caller can't
+// tell "unknown email" from "wrong password" by timing (AUTH_DESIGN §6).
+const DUMMY_PASSWORD_HASH = '$argon2id$v=19$m=65536,t=3,p=1$BL+C97xOfh5LG9Jldn0fEQ$jLHA/3RRfOsnLGFQkFPmn2it60qN26naBOjwMCD8S2g';
+
+// POST /auth/password-login { email, password } → { token }
+// Mints an access JWT the client then presents to /user-login as Bearer,
+// exactly like the old Firebase idToken. Generic error for unknown email or
+// wrong password (no user enumeration); rate-limited in routes/auth.ts.
+export const passwordLogin = async (req: Request, res: Response) => {
+	const errors = validationResult(req);
+	if (!errors.isEmpty()) {
+		res.locals.type = 'warn';
+		res.locals.message = `invalid input: ${formatError(errors)}`;
+		res.status(400).json({ message: 'error_api_bad-request' });
+		return;
+	}
+
+	const { email, password } = req.body as { email: string; password: string };
+
+	const uid = await findUidByEmail(email);
+	const record = uid ? await getCredentials(uid) : undefined;
+
+	const passwordOk = await verifyPassword(record?.password_hash ?? DUMMY_PASSWORD_HASH, password);
+
+	if (!record || !record.password_hash || !passwordOk) {
+		res.locals.type = 'warn';
+		res.locals.message = 'invalid credentials';
+		res.status(401).json({ message: 'error_auth_invalid-credentials' });
+		return;
+	}
+
+	const token = await issueAccessToken(record.uid);
+
+	res.locals.type = 'info';
+	res.locals.message = 'password login success';
+	res.status(200).json({ token });
+};
+
+// POST /auth/token-login { code } → { token }
+// Completes the passwordless email-link flow: consume the one-time code and
+// mint an access JWT. Rate-limited in routes/auth.ts.
+export const tokenLogin = async (req: Request, res: Response) => {
+	const errors = validationResult(req);
+	if (!errors.isEmpty()) {
+		res.locals.type = 'warn';
+		res.locals.message = `invalid input: ${formatError(errors)}`;
+		res.status(400).json({ message: 'error_api_bad-request' });
+		return;
+	}
+
+	const { code } = req.body as { code: string };
+
+	const uid = await consumeEmailLoginToken(code);
+
+	if (!uid) {
+		res.locals.type = 'warn';
+		res.locals.message = 'invalid or expired login code';
+		res.status(401).json({ message: 'error_auth_invalid-token' });
+		return;
+	}
+
+	const token = await issueAccessToken(uid);
+
+	res.locals.type = 'info';
+	res.locals.message = 'email token login success';
+	res.status(200).json({ token });
+};
+
+// POST /session-token → { token }
+// Silent access-token refresh. Access JWTs live 15 minutes; when one expires the
+// client mints a fresh one here, authorized solely by the signed httpOnly
+// visitorid session cookie. That cookie IS the revocable "refresh token" —
+// upstream's session store gates it, so a terminated session cannot refresh.
+// No credentials are accepted here, so it is not brute-forceable.
+export const sessionToken = async (req: Request, res: Response) => {
+	const visitorid = req.signedCookies.visitorid;
+
+	if (!visitorid) {
+		res.locals.type = 'warn';
+		res.locals.message = 'no device session';
+		res.status(401).json({ message: 'error_auth_invalid-token' });
+		return;
+	}
+
+	const user = UsersList.findByVisitorId(visitorid);
+	const session = user?.sessions?.find((record) => record.visitorid === visitorid);
+
+	if (!user || !session) {
+		res.clearCookie('visitorid');
+		res.locals.type = 'warn';
+		res.locals.message = 'session revoked or not found';
+		res.status(401).json({ message: 'error_auth_invalid-token' });
+		return;
+	}
+
+	// preserve the MFA gate: an MFA account must have cleared 2FA on this session
+	if (user.profile.mfa_enabled && !session.mfaVerified) {
+		res.locals.type = 'warn';
+		res.locals.message = 'two factor authentication required';
+		res.status(401).json({ message: 'LOGIN_FIRST' });
+		return;
+	}
+
+	const token = await issueAccessToken(user.profile.auth_uid!);
+
+	res.locals.type = 'info';
+	res.locals.message = 'session token refresh';
+	res.status(200).json({ token });
 };
