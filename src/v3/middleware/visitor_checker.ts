@@ -125,6 +125,17 @@ export const pocketVisitorChecker = () => {
 				return;
 			}
 
+			// The pocket path authorizes on the visitorid cookie alone (no JWT, no
+			// MFA gate). A regular (vip/admin) account must NOT be reachable here —
+			// otherwise a pre-MFA session cookie would bypass both the JWT check and
+			// the MFA gate that visitorChecker enforces. Restrict to pocket accounts.
+			if (user.profile.role !== 'pocket') {
+				res.locals.type = 'warn';
+				res.locals.message = 'non-pocket account may not use the pocket endpoints';
+				res.status(403).json({ message: 'ACCOUNT_NOT_FOUND' });
+				return;
+			}
+
 			// assign local vars for current user in next route
 			res.locals.currentUser = user;
 

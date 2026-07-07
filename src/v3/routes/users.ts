@@ -26,6 +26,24 @@ const router = express.Router();
 // activate middleware at this point
 router.use(visitorChecker());
 
+// Object-level authorization: every /users/:id route is a self-service action
+// (own 2fa, sessions, backup, applications, erase, ...). Bind the :id param to
+// the authenticated user so one account can't act on another's by guessing/
+// leaking its id (congregation admins are handed member ids). visitorChecker has
+// already set res.locals.currentUser.
+router.param('id', (req, res, next, id) => {
+	const user = res.locals.currentUser;
+
+	if (!user || user.id !== id) {
+		res.locals.type = 'warn';
+		res.locals.message = 'a user may only act on their own account';
+		res.status(403).json({ message: 'FORBIDDEN' });
+		return;
+	}
+
+	next();
+});
+
 // validate user for active session
 router.get('/validate-me', validateUser);
 
