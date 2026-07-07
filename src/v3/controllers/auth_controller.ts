@@ -21,7 +21,9 @@ const isDev = process.env.NODE_ENV === 'development';
 // endpoint, so it must never be trusted verbatim — otherwise the real service
 // would email a victim a login link (carrying a one-time code) pointing at an
 // attacker domain. We validate against this allowlist and fall back to the
-// canonical app origin when the request origin is not allowed.
+// canonical app origin when the request origin is not allowed. NOTE: this is
+// deliberately NARROWER than app.ts's CORS `whitelist` — a login link must only
+// ever point at a real app frontend, never at the admin consoles. Keep separate.
 const APP_ORIGIN_ALLOWLIST = [
 	'https://organized-app.com',
 	'https://staging.organized-app.com',
@@ -206,11 +208,26 @@ export const createSignInLink = async (req: Request, res: Response) => {
 		};
 
 		MailClient.sendEmail(options, 'Passwordless link sent to user');
+
+		res.locals.type = 'info';
+		res.locals.message = 'passwordless link will be sent to user';
+		res.status(200).json({ message: 'SIGNIN_LINK_SEND' });
+		return;
 	}
 
-	res.locals.type = 'info';
-	res.locals.message = 'passwordless link will be sent to user';
-	res.status(200).json(MAIL_ENABLED ? { message: 'SIGNIN_LINK_SEND' } : { link, otp });
+	// Mail is disabled. Returning the raw link/otp is a DEV-ONLY convenience —
+	// in production it would hand an unauthenticated caller a login code for any
+	// email (account takeover). Fail closed outside development.
+	if (isDev) {
+		res.locals.type = 'info';
+		res.locals.message = 'passwordless link returned (dev, mail disabled)';
+		res.status(200).json({ link, otp });
+		return;
+	}
+
+	res.locals.type = 'error';
+	res.locals.message = 'mail is not configured; passwordless login unavailable';
+	res.status(500).json({ message: 'MAIL_NOT_CONFIGURED' });
 };
 
 export const verifyPasswordlessInfo = async (req: Request, res: Response) => {
@@ -353,17 +370,19 @@ export const verifyEmailToken = async (req: Request, res: Response) => {
 
 	const authUser = UsersList.findByEmail(email);
 
+	// Unknown email, no pending OTP, and wrong/expired OTP all return the SAME
+	// generic response so this endpoint isn't an account-existence oracle.
 	if (!authUser) {
 		res.locals.type = 'warn';
-		res.locals.message = 'user record not found';
-		res.status(404).json({ message: 'USER_NOT_FOUND' });
+		res.locals.message = 'email token verify failed: no such user';
+		res.status(403).json({ message: 'error_auth_invalid-token' });
 		return;
 	}
 
 	if (!authUser.profile.email_otp) {
 		res.locals.type = 'warn';
-		res.locals.message = 'user email otp not found in records';
-		res.status(404).json({ message: 'error_auth_invalid-token' });
+		res.locals.message = 'email token verify failed: no pending otp';
+		res.status(403).json({ message: 'error_auth_invalid-token' });
 		return;
 	}
 
