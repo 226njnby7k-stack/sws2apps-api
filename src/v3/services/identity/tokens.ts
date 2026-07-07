@@ -18,6 +18,10 @@
 import crypto from 'node:crypto';
 import { SignJWT, jwtVerify, importPKCS8, importSPKI } from 'jose';
 import { getFileFromStorage, uploadFileToStorage } from '../firebase/storage_utils.js';
+import { withLock } from './lock.js';
+
+// serialize the read-modify-write of the shared email-tokens file
+const EMAIL_TOKENS_LOCK = 'identity/tokens';
 
 const ISSUER = 'organized-selfhosted';
 const AUDIENCE = 'organized-app';
@@ -99,33 +103,36 @@ const writeTokens = async (tokens: EmailTokenFile) => {
 };
 
 /** Create a one-time login token for uid; the RAW token goes in the email link. */
-export const createEmailLoginToken = async (uid: string): Promise<string> => {
-	const raw = crypto.randomBytes(32).toString('base64url');
-	const now = Date.now();
+export const createEmailLoginToken = async (uid: string): Promise<string> =>
+	withLock(EMAIL_TOKENS_LOCK, async () => {
+		const raw = crypto.randomBytes(32).toString('base64url');
+		const now = Date.now();
 
-	const tokens = (await readTokens()).filter((t) => Date.parse(t.expires_at) > now);
+		const tokens = (await readTokens()).filter((t) => Date.parse(t.expires_at) > now);
 
-	tokens.push({
-		token_hash: sha256(raw),
-		uid,
-		expires_at: new Date(now + EMAIL_TOKEN_TTL_MS).toISOString(),
+		tokens.push({
+			token_hash: sha256(raw),
+			uid,
+			expires_at: new Date(now + EMAIL_TOKEN_TTL_MS).toISOString(),
+		});
+
+		await writeTokens(tokens);
+		return raw;
 	});
 
-	await writeTokens(tokens);
-	return raw;
-};
-
 /** Consume (single-use) a login token. Returns uid, or undefined. */
-export const consumeEmailLoginToken = async (raw: string): Promise<string | undefined> => {
-	const hash = sha256(raw);
-	const now = Date.now();
+export const consumeEmailLoginToken = async (raw: string): Promise<string | undefined> =>
+	withLock(EMAIL_TOKENS_LOCK, async () => {
+		const hash = sha256(raw);
+		const now = Date.now();
 
-	const tokens = await readTokens();
-	const match = tokens.find((t) => t.token_hash === hash && Date.parse(t.expires_at) > now);
+		const tokens = await readTokens();
+		const match = tokens.find((t) => t.token_hash === hash && Date.parse(t.expires_at) > now);
 
-	// remove the used token AND any expired ones, atomically with the read
-	const remaining = tokens.filter((t) => t.token_hash !== hash && Date.parse(t.expires_at) > now);
-	await writeTokens(remaining);
+		// remove the used token AND any expired ones — serialized so a token can't
+		// be consumed twice by concurrent requests.
+		const remaining = tokens.filter((t) => t.token_hash !== hash && Date.parse(t.expires_at) > now);
+		await writeTokens(remaining);
 
-	return match?.uid;
-};
+		return match?.uid;
+	});

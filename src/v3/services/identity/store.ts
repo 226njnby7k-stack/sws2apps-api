@@ -15,6 +15,11 @@ import { getFileFromStorage, uploadFileToStorage } from '../firebase/storage_uti
 // does not handle type 'api' and would fall through to prefix-deleting 'v3/'
 // (i.e. ALL data). We call the disk adapter directly with the full path.
 import { deleteObjectsByPrefix } from '../storage/disk.js';
+import { withLock } from './lock.js';
+
+// All index-mutating writes serialize under one key so concurrent
+// create/update/delete can't drop an email→uid mapping or lose a credential.
+const IDENTITY_LOCK = 'identity/index';
 
 export type CredentialRecord = {
 	uid: string;
@@ -52,71 +57,75 @@ export const getCredentials = async (uid: string): Promise<CredentialRecord | un
 };
 
 /** Create an identity. Replaces the Firebase createUser({ email }) call. */
-export const createIdentity = async (email: string, password_hash?: string): Promise<CredentialRecord> => {
-	const normalized = normalizeEmail(email);
-	const index = await readIndex();
+export const createIdentity = async (email: string, password_hash?: string): Promise<CredentialRecord> =>
+	withLock(IDENTITY_LOCK, async () => {
+		const normalized = normalizeEmail(email);
+		const index = await readIndex();
 
-	if (index[normalized]) {
-		throw new Error('identity: email already registered');
-	}
+		if (index[normalized]) {
+			throw new Error('identity: email already registered');
+		}
 
-	const now = new Date().toISOString();
-	const record: CredentialRecord = {
-		uid: crypto.randomUUID(),
-		email: normalized,
-		password_hash,
-		created_at: now,
-		updated_at: now,
-	};
+		const now = new Date().toISOString();
+		const record: CredentialRecord = {
+			uid: crypto.randomUUID(),
+			email: normalized,
+			password_hash,
+			created_at: now,
+			updated_at: now,
+		};
 
-	await uploadFileToStorage(JSON.stringify(record), { type: 'api', path: credPath(record.uid) });
+		await uploadFileToStorage(JSON.stringify(record), { type: 'api', path: credPath(record.uid) });
 
-	index[normalized] = record.uid;
-	await writeIndex(index);
+		index[normalized] = record.uid;
+		await writeIndex(index);
 
-	return record;
-};
+		return record;
+	});
 
 /** Replaces the Firebase updateUser(uid, { email }) call. */
-export const updateIdentityEmail = async (uid: string, newEmail: string) => {
-	const record = await getCredentials(uid);
-	if (!record) throw new Error('identity: user not found');
+export const updateIdentityEmail = async (uid: string, newEmail: string) =>
+	withLock(IDENTITY_LOCK, async () => {
+		const record = await getCredentials(uid);
+		if (!record) throw new Error('identity: user not found');
 
-	const normalized = normalizeEmail(newEmail);
-	const index = await readIndex();
+		const normalized = normalizeEmail(newEmail);
+		const index = await readIndex();
 
-	if (index[normalized] && index[normalized] !== uid) {
-		throw new Error('identity: email already registered');
-	}
+		if (index[normalized] && index[normalized] !== uid) {
+			throw new Error('identity: email already registered');
+		}
 
-	delete index[record.email];
-	index[normalized] = uid;
+		delete index[record.email];
+		index[normalized] = uid;
 
-	record.email = normalized;
-	record.updated_at = new Date().toISOString();
+		record.email = normalized;
+		record.updated_at = new Date().toISOString();
 
-	await uploadFileToStorage(JSON.stringify(record), { type: 'api', path: credPath(uid) });
-	await writeIndex(index);
-};
+		await uploadFileToStorage(JSON.stringify(record), { type: 'api', path: credPath(uid) });
+		await writeIndex(index);
+	});
 
-export const updateIdentityPassword = async (uid: string, password_hash: string) => {
-	const record = await getCredentials(uid);
-	if (!record) throw new Error('identity: user not found');
+export const updateIdentityPassword = async (uid: string, password_hash: string) =>
+	withLock(IDENTITY_LOCK, async () => {
+		const record = await getCredentials(uid);
+		if (!record) throw new Error('identity: user not found');
 
-	record.password_hash = password_hash;
-	record.updated_at = new Date().toISOString();
+		record.password_hash = password_hash;
+		record.updated_at = new Date().toISOString();
 
-	await uploadFileToStorage(JSON.stringify(record), { type: 'api', path: credPath(uid) });
-};
+		await uploadFileToStorage(JSON.stringify(record), { type: 'api', path: credPath(uid) });
+	});
 
 /** Replaces the Firebase deleteUser(uid) call. */
-export const deleteIdentity = async (uid: string) => {
-	const record = await getCredentials(uid);
-	if (!record) return;
+export const deleteIdentity = async (uid: string) =>
+	withLock(IDENTITY_LOCK, async () => {
+		const record = await getCredentials(uid);
+		if (!record) return;
 
-	const index = await readIndex();
-	delete index[record.email];
-	await writeIndex(index);
+		const index = await readIndex();
+		delete index[record.email];
+		await writeIndex(index);
 
-	await deleteObjectsByPrefix(`v3/api/${credPath(uid)}`);
-};
+		await deleteObjectsByPrefix(`v3/api/${credPath(uid)}`);
+	});
