@@ -1,12 +1,17 @@
 import { API_VAR } from '../../index.js';
+import { getApiSettings, setApiSettings } from '../services/firebase/api.js';
 
 /**
- * M5 stub: upstream stored `api_settings_v3` (the minimum supported client
- * version) in Firestore. Until that tiny bit of state is migrated to the
- * storage adapter (milestone M5), seed it from env / a safe default so the API
- * boots with zero Firestore dependency. Behaviour is unchanged for clients:
- * MINIMUM_APP_VERSION is still populated before the server accepts requests.
+ * M5: api_settings (the minimum supported client version) now lives on the disk
+ * storage adapter (v3/api/settings.txt), not Firestore. Read it on boot, seeding
+ * the file on first run from MINIMUM_APP_VERSION env / a safe default so admin
+ * updates persist across restarts. Zero Firestore dependency.
  */
 export const initializeAPI = async () => {
-	API_VAR.MINIMUM_APP_VERSION = process.env.MINIMUM_APP_VERSION || '1.0.0';
+	const settings = await getApiSettings();
+
+	// ensure the file exists so admin POST /client-version has something to update
+	await setApiSettings(settings);
+
+	API_VAR.MINIMUM_APP_VERSION = settings.minimum_version;
 };
