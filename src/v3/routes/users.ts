@@ -11,6 +11,7 @@ import {
 	getUserUpdates,
 	joinCongregation,
 	postUserReport,
+	registerPassword,
 	retrieveUserBackup,
 	saveUserBackup,
 	saveUserChunkedBackup,
@@ -81,6 +82,9 @@ router.post('/:id/backup', body('cong_backup').isObject(), saveUserBackup);
 
 // get user updates
 router.get('/:id/updates-routine', getUserUpdates);
+
+// set a password on the authenticated user's own account (enables password-login)
+router.post('/:id/register-password', body('password').isString().notEmpty(), registerPassword);
 
 // get user updates
 router.post('/:id/feedback', body('subject').notEmpty().isString(), body('message').notEmpty().isString(), userPostFeedback);

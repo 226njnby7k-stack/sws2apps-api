@@ -15,6 +15,8 @@ import { congregationJoinRequestsGet, findBackupByCongregation } from '../servic
 import { backupUploadsInProgress } from '../../index.js';
 import { logger } from '../services/logger/logger.js';
 import { getUserRoles, saveUserBackupAsync } from '../services/api/users.js';
+import { updateIdentityPassword } from '../services/identity/store.js';
+import { hashPassword, isPasswordAcceptable } from '../services/identity/passwords.js';
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -1274,4 +1276,44 @@ export const saveUserChunkedBackup = async (req: Request, res: Response) => {
 	res.locals.type = 'info';
 	res.locals.message = `congregation backup chunk processed`;
 	res.status(200).json({ message: 'BACKUP_CHUNK_RECEIVED' });
+};
+
+// POST /users/:id/register-password — set a password on the authenticated user's
+// OWN account, enabling password-login for a passwordless-only account. Guarded
+// by visitorChecker (valid JWT + visitorid session, MFA-cleared if enabled) and
+// an owner check, so it is not the unauthenticated account-takeover primitive
+// deferred in M4.
+export const registerPassword = async (req: Request, res: Response) => {
+	const errors = validationResult(req);
+	if (!errors.isEmpty()) {
+		res.locals.type = 'warn';
+		res.locals.message = `invalid input: ${formatError(errors)}`;
+		res.status(400).json({ message: 'error_api_bad-request' });
+		return;
+	}
+
+	const user = res.locals.currentUser;
+	const { id } = req.params;
+
+	if (user.id !== id) {
+		res.locals.type = 'warn';
+		res.locals.message = 'a user may only set their own password';
+		res.status(403).json({ message: 'FORBIDDEN' });
+		return;
+	}
+
+	const { password } = req.body as { password: string };
+
+	if (!isPasswordAcceptable(password)) {
+		res.locals.type = 'warn';
+		res.locals.message = 'password does not meet strength requirements';
+		res.status(400).json({ message: 'error_auth_weak-password' });
+		return;
+	}
+
+	await updateIdentityPassword(user.profile.auth_uid!, await hashPassword(password));
+
+	res.locals.type = 'info';
+	res.locals.message = 'user set account password';
+	res.status(200).json({ message: 'PASSWORD_SET' });
 };
