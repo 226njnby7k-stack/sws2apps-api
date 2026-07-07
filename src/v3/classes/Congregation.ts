@@ -366,6 +366,11 @@ export class Congregation {
 
 				if (!findUser) continue;
 
+				// An admin may only set roles for members of THEIR OWN congregation.
+				// Without this, a crafted cong_users entry could rewrite the cong_role
+				// of a user in a different congregation.
+				if (findUser.profile.congregation?.id !== this.id) continue;
+
 				const profile = structuredClone(findUser.profile);
 				profile.congregation!.cong_role = user?.role || [];
 
