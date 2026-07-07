@@ -2,14 +2,23 @@ import fetch from 'node-fetch';
 import { Request, Response } from 'express';
 import { validationResult } from 'express-validator';
 import { CongregationsList } from '../classes/Congregations.js';
-import { ApiCongregationSearchResponse } from '../definition/congregation.js';
+import { ApiCongregationSearchResponse, CongregationCreateInfoType } from '../definition/congregation.js';
 import { formatError } from '../utils/format_log.js';
 import { StandardRecord } from '../definition/app.js';
 import { MailClient } from '../config/mail_config.js';
 import { formatMeetingWeekday } from '../utils/congregation_utils.js';
 import { ALL_LANGUAGES } from '../constant/langList.js';
+import { SELF_HOSTED_COUNTRIES } from '../constant/countries.js';
 
 const MAIL_ENABLED = process.env.MAIL_ENABLED === 'true';
+
+// A fully self-hosted instance must not depend on the external sws2apps directory
+// (APP_COUNTRY_API / APP_CONGREGATION_API — PROJECT.md §2). When SELF_HOSTED is
+// set, the country list is served from a bundled static list, directory search is
+// disabled, and congregations are created from user-entered details with no
+// external "is this congregation authentic" gate (the admin fills meeting times /
+// circuit / location afterwards in settings). Default off = upstream behaviour.
+const SELF_HOSTED = process.env.SELF_HOSTED === 'true';
 
 export const getCountries = async (req: Request, res: Response) => {
 	const errors = validationResult(req);
@@ -22,6 +31,13 @@ export const getCountries = async (req: Request, res: Response) => {
 
 		res.status(400).json({ message: 'error_api_bad-request' });
 
+		return;
+	}
+
+	if (SELF_HOSTED) {
+		res.locals.type = 'info';
+		res.locals.message = 'user fetched all countries (self-hosted static list)';
+		res.status(200).json(SELF_HOSTED_COUNTRIES);
 		return;
 	}
 
@@ -54,6 +70,15 @@ export const getCongregations = async (req: Request, res: Response) => {
 
 		res.status(400).json({ message: 'error_api_bad-request' });
 
+		return;
+	}
+
+	if (SELF_HOSTED) {
+		// No external directory to search; self-hosted onboarding lets the admin
+		// type their congregation name directly instead of picking from a directory.
+		res.locals.type = 'info';
+		res.locals.message = 'congregation directory search is disabled (self-hosted)';
+		res.status(200).json([]);
 		return;
 	}
 
@@ -118,39 +143,68 @@ export const createCongregation = async (req: Request, res: Response) => {
 		return;
 	}
 
-	// is congregation authentic
 	const language = (req.headers.language as string) || 'eng';
-	const code = ALL_LANGUAGES.find((record) => record.threeLettersCode === language)?.code ?? 'E';
 
-	const url = process.env.APP_CONGREGATION_API! + new URLSearchParams({ country: country_guid, language: code, name: cong_name });
+	// Directory-derived details. Self-hosted: the admin typed the name, so there
+	// is no external directory to validate against or to pull meeting/circuit/
+	// location from — start with neutral defaults (Tue/Sat 00:00, matching the
+	// client schema) that the admin edits later in settings. Otherwise: verify the
+	// congregation against the external sws2apps directory and copy its details,
+	// exactly as upstream.
+	type CongDetails = Pick<
+		CongregationCreateInfoType,
+		'cong_guid' | 'cong_circuit' | 'cong_location' | 'midweek_meeting' | 'weekend_meeting'
+	>;
+	let congDetails: CongDetails;
 
-	const response = await fetch(url);
-	if (response.status !== 200) {
-		res.locals.type = 'warn';
-		res.locals.message = 'an error occured while verifying the congregation data';
-		res.status(response.status).json({ message: 'REQUEST_NOT_VALIDATED' });
+	if (SELF_HOSTED) {
+		congDetails = {
+			cong_guid: '',
+			cong_circuit: '',
+			cong_location: { address: '', lat: 0, lng: 0 },
+			midweek_meeting: { time: '00:00', weekday: 2 },
+			weekend_meeting: { time: '00:00', weekday: 6 },
+		};
+	} else {
+		// is congregation authentic
+		const code = ALL_LANGUAGES.find((record) => record.threeLettersCode === language)?.code ?? 'E';
 
-		return;
-	}
+		const url = process.env.APP_CONGREGATION_API! + new URLSearchParams({ country: country_guid, language: code, name: cong_name });
 
-	const congsList = (await response.json()) as ApiCongregationSearchResponse[];
+		const response = await fetch(url);
+		if (response.status !== 200) {
+			res.locals.type = 'warn';
+			res.locals.message = 'an error occured while verifying the congregation data';
+			res.status(response.status).json({ message: 'REQUEST_NOT_VALIDATED' });
 
-	let isValidCong = false;
-
-	if (congsList?.length > 0) {
-		const findCong = congsList.find((record) => record.congName === cong_name);
-
-		if (findCong) {
-			isValidCong = true;
+			return;
 		}
-	}
 
-	if (!isValidCong) {
-		res.locals.type = 'warn';
-		res.locals.message = 'this request does not match any valid congregation';
-		res.status(400).json({ message: 'BAD_REQUEST' });
+		const congsList = (await response.json()) as ApiCongregationSearchResponse[];
 
-		return;
+		const congRequest = congsList?.find((record) => record.congName === cong_name);
+
+		if (!congRequest) {
+			res.locals.type = 'warn';
+			res.locals.message = 'this request does not match any valid congregation';
+			res.status(400).json({ message: 'BAD_REQUEST' });
+
+			return;
+		}
+
+		congDetails = {
+			cong_guid: congRequest.congGuid,
+			cong_circuit: congRequest.circuit,
+			cong_location: { address: congRequest.address, lat: congRequest.location.lat, lng: congRequest.location.lng },
+			midweek_meeting: {
+				time: congRequest.midweekMeetingTime.time.slice(0, -3),
+				weekday: formatMeetingWeekday(congRequest.midweekMeetingTime.weekday),
+			},
+			weekend_meeting: {
+				time: congRequest.weekendMeetingTime.time.slice(0, -3),
+				weekday: formatMeetingWeekday(congRequest.weekendMeetingTime.weekday),
+			},
+		};
 	}
 
 	// update user details
@@ -163,23 +217,11 @@ export const createCongregation = async (req: Request, res: Response) => {
 	await user.updateProfile(profile);
 
 	// create congregation
-	const congRequest = congsList.find((record) => record.congName === cong_name)!;
-
 	const congId = await CongregationsList.create({
 		cong_name,
 		country_guid,
 		country_code,
-		cong_guid: congRequest.congGuid,
-		cong_circuit: congRequest.circuit,
-		cong_location: { address: congRequest.address, lat: congRequest.location.lat, lng: congRequest.location.lng },
-		midweek_meeting: {
-			time: congRequest.midweekMeetingTime.time.slice(0, -3),
-			weekday: formatMeetingWeekday(congRequest.midweekMeetingTime.weekday),
-		},
-		weekend_meeting: {
-			time: congRequest.weekendMeetingTime.time.slice(0, -3),
-			weekday: formatMeetingWeekday(congRequest.weekendMeetingTime.weekday),
-		},
+		...congDetails,
 	});
 
 	// add user to congregation
