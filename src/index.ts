@@ -13,6 +13,17 @@ import { Installation } from './v3/classes/Installation.js';
 import { initializeAPI } from './v3/config/app.db_config.js';
 import { createDevTestUsers } from './v3/config/dev.config.js';
 
+// Fail fast on missing secrets. SEC_ENCRYPT_KEY protects ALL data at rest and
+// signs the visitorid session cookie — running without it means forgeable
+// sessions and worthless at-rest encryption. The AUTH_JWT keys sign/verify
+// access tokens. Never boot with a silent fallback.
+if (!process.env.SEC_ENCRYPT_KEY) {
+	throw new Error('SEC_ENCRYPT_KEY is required (data-at-rest encryption + cookie signing). Set it before starting.');
+}
+if (!process.env.AUTH_JWT_PRIVATE_KEY || !process.env.AUTH_JWT_PUBLIC_KEY) {
+	throw new Error('AUTH_JWT_PRIVATE_KEY and AUTH_JWT_PUBLIC_KEY are required for access-token signing.');
+}
+
 const PORT = process.env.PORT || 8000;
 const APP_VERSION = process.env.npm_package_version;
 
