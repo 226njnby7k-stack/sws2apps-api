@@ -1,4 +1,3 @@
-import cors, { CorsOptions } from 'cors';
 import express, { Request } from 'express';
 import { handle } from 'i18next-http-middleware';
 import favicon from 'serve-favicon';
@@ -21,7 +20,10 @@ import routesV3 from './v3/routes/index.js';
 import { errorHandler, getRoot, invalidEndpointHandler } from './v3/controllers/app_controller.js';
 import resources from './v3/config/i18n_config.js';
 
-// allowed apps url
+// Origins allowed to make CREDENTIALED cross-origin (CORS) calls. This set is
+// intentionally BROADER than auth_controller's APP_ORIGIN_ALLOWLIST (which gates
+// where a passwordless sign-in link may point) — it includes the admin consoles,
+// which must never receive an emailed login link. Do not merge the two lists.
 const whitelist = [
 	'https://organized-app.com',
 	'https://staging.organized-app.com',
@@ -34,26 +36,23 @@ const whitelist = [
 
 const allowedUri = ['/app-version', '/api/public/source-material'];
 
-const corsOptionsDelegate = function (req: Request, callback: (_: null, options: CorsOptions) => void) {
-	const corsOptions: CorsOptions = { origin: true, credentials: true };
+// Origins allowed to make CREDENTIALED cross-origin calls. Reflecting an
+// arbitrary Origin together with Allow-Credentials:true lets any site drive the
+// API with the victim's cookie — so gate it to known app origins (+ APP_ORIGIN,
+// + localhost in dev).
+const isAllowedOrigin = (origin?: string): boolean => {
+	if (!origin) return false;
+	if (whitelist.includes(origin)) return true;
+	if (process.env.APP_ORIGIN && origin === process.env.APP_ORIGIN) return true;
+	if (process.env.NODE_ENV !== 'production' && /^https?:\/\/localhost(:\d+)?$/.test(origin)) return true;
+	return false;
+};
 
-	if (process.env.NODE_ENV === 'production') {
-		const reqOrigin = req.header('Origin');
-		if (reqOrigin) {
-			if (whitelist.indexOf(reqOrigin) === -1) {
-				const originalUri = req.headers['x-original-uri'] as string;
-
-				if (originalUri !== '/') {
-					const allowed = allowedUri.find((uri) => uri.startsWith(originalUri)) ? true : false;
-					corsOptions.origin = allowed;
-				}
-			}
-		} else {
-			corsOptions.origin = false;
-		}
-	}
-
-	callback(null, corsOptions); // callback expects two parameters: error and options
+// True for the handful of endpoints that are meant to be readable cross-origin
+// by anyone (no cookie needed). These get ACAO:* WITHOUT credentials.
+const isPublicUri = (req: Request): boolean => {
+	const uri = (req.headers['x-original-uri'] as string) || req.path;
+	return allowedUri.some((allowed) => uri.startsWith(allowed));
 };
 
 const app = express();
@@ -68,17 +67,31 @@ const __dirname = path.resolve();
 
 app.use(favicon(path.join(__dirname, 'public', 'favicon.ico')));
 
-app.use(cors(corsOptionsDelegate));
-
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
+// Single authoritative CORS handler. This replaces the previous `cors()`
+// middleware, which short-circuited OPTIONS preflight and — in non-production —
+// reflected ANY Origin together with Allow-Credentials:true (a credentialed
+// cross-origin hole). Rules:
+//   1. Allowlisted origin  -> echo Origin + Allow-Credentials:true.
+//   2. Public endpoint     -> ACAO:* WITHOUT credentials (read-only, no cookie).
+//   3. Otherwise           -> no ACAO at all (browser blocks the response).
 app.use((req, res, next) => {
-	res.header('Access-Control-Allow-Origin', req.headers.origin);
+	const origin = req.headers.origin;
+
+	res.header('Vary', 'Origin');
+
+	if (origin && isAllowedOrigin(origin)) {
+		res.header('Access-Control-Allow-Origin', origin);
+		res.header('Access-Control-Allow-Credentials', 'true');
+	} else if (isPublicUri(req)) {
+		res.header('Access-Control-Allow-Origin', '*');
+	}
+
 	res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,PATCH,DELETE,OPTIONS');
 	res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-	res.header('Access-Control-Allow-Credentials', 'true');
 	res.header('Access-Control-Max-Age', '86400');
 
 	if (req.method === 'OPTIONS') {
