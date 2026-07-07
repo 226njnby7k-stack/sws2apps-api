@@ -16,8 +16,13 @@
 
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 
 const STORAGE_ROOT = path.resolve(process.env.STORAGE_PATH || './storage');
+
+// Monotonic per-process counter so concurrent writes to the same object never
+// collide on a temp filename (pid + Date.now() alone collide within one ms).
+let tmpSeq = 0;
 
 export type StoredFileMetadata = {
 	/** ISO 8601 last-modified timestamp — mirrors GCS metadata.updated */
@@ -65,8 +70,13 @@ export const saveObject = async (objectName: string, data: string): Promise<void
 
 	await fs.mkdir(path.dirname(filePath), { recursive: true });
 
-	// write-to-temp + rename = atomic on POSIX; no torn files on crash
-	const tmpPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+	// write-to-temp + rename = atomic on POSIX; no torn files on crash.
+	// The temp name must be unique per concurrent write to the same object,
+	// otherwise two writers in the same millisecond share a temp path and the
+	// second rename hits ENOENT after the first renames it away. A monotonic
+	// counter + random suffix guarantees uniqueness.
+	const unique = `${process.pid}-${Date.now()}-${(tmpSeq = (tmpSeq + 1) >>> 0)}-${crypto.randomBytes(4).toString('hex')}`;
+	const tmpPath = `${filePath}.tmp-${unique}`;
 	await fs.writeFile(tmpPath, data, 'utf-8');
 	await fs.rename(tmpPath, filePath);
 };
