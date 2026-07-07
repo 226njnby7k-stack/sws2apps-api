@@ -81,6 +81,8 @@ export type UserProfile = {
 
 export type UserSession = {
 	mfaVerified?: boolean;
+	/** highest TOTP step (30s counter) accepted on this session — blocks replay */
+	mfa_last_counter?: number;
 	last_seen: string;
 	visitor_details: {
 		browser: string;

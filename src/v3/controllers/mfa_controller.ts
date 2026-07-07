@@ -41,10 +41,11 @@ export const verifyToken = async (req: Request, res: Response) => {
 		secret: OTPAuth.Secret.fromBase32(secret.secret),
 	});
 
-	// Validate a token.
+	// Validate a token. `window: 1` accepts the current 30s step and ±1 adjacent
+	// step for clock drift; totp.validate returns that delta (-1|0|1) or null.
 	const delta = totp.validate({ token: token, window: 1 });
 
-	if (delta === null || delta === undefined || (delta < -1 && delta > 1)) {
+	if (delta === null || delta === undefined) {
 		res.locals.type = 'warn';
 		res.locals.message = 'OTP token invalid';
 		res.status(403).json({ message: 'TOKEN_INVALID' });
@@ -55,6 +56,18 @@ export const verifyToken = async (req: Request, res: Response) => {
 
 	const newSessions = structuredClone(sessions);
 	const findSession = newSessions.find((session) => session.visitorid === visitorid)!;
+
+	// Reject replay: a given 30s TOTP step may be accepted at most once per
+	// session, so a captured code can't be reused inside its ±1 window (~90s).
+	const step = Math.floor(Date.now() / 1000 / 30) + delta;
+	if (findSession.mfa_last_counter !== undefined && step <= findSession.mfa_last_counter) {
+		res.locals.type = 'warn';
+		res.locals.message = 'OTP token already used';
+		res.status(403).json({ message: 'TOKEN_INVALID' });
+		return;
+	}
+	findSession.mfa_last_counter = step;
+
 	findSession.last_seen = new Date().toISOString();
 	findSession.mfaVerified = true;
 
