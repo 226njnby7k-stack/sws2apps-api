@@ -1,0 +1,17 @@
+[backup-remote]
+type = s3
+provider = ${RCLONE_S3_PROVIDER:-Other}
+access_key_id = ${RCLONE_ACCESS_KEY_ID}
+secret_access_key = ${RCLONE_SECRET_ACCESS_KEY}
+endpoint = ${RCLONE_ENDPOINT}
+region = ${RCLONE_REGION:-auto}
+
+# This template targets any S3-compatible object storage (Hetzner Object Storage,
+# Backblaze B2's S3-compatible endpoint, Scaleway, etc.) — pick one in a DIFFERENT
+# location/provider than your main VPS. Adjust BACKUP_DESTINATION in .env to
+# "backup-remote:your-bucket-name".
+#
+# Using a different remote type (SFTP, Google Drive, etc.)? Replace this whole
+# file with the equivalent `rclone config` output for that remote — run
+# `rclone config` interactively once on your own machine to generate a working
+# example, then translate it into template form here.

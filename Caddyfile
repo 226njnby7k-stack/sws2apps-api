@@ -1,3 +1,40 @@
-api.example.org {
-	reverse_proxy api:8000
+# Caddyfile — same-origin client + API, automatic TLS
+#
+# Same-origin matters: it's what lets COOKIE_SAMESITE=lax be safe (per the audit,
+# finding #4) instead of needing sameSite=none. Client and API share one domain;
+# Caddy routes by path, the browser sees a single origin.
+
+{$DOMAIN} {
+	# VERIFIED (M7): every real API route mounts under /api/v3/* (see
+	# src/v3/routes/index.ts), which /api/* covers. The only non-/api routes are
+	# `/` (getRoot — but the client owns `/` here, so that's intended) and
+	# `/health` (called container-internally on :8000, bypassing Caddy). No API
+	# route lives outside /api/*, so nothing silently falls through to index.html.
+	handle /api/* {
+		reverse_proxy api:8000
+	}
+
+	# Everything else is the static client build
+	handle {
+		root * /srv/client
+		try_files {path} /index.html   # SPA fallback — client-side router owns the rest
+		file_server
+	}
+
+	# Baseline hardening headers. Adjust CSP if you add external resources.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	encode gzip zstd
+
+	log {
+		output file /data/access.log {
+			roll_size 50mb
+			roll_keep 5
+		}
+	}
 }

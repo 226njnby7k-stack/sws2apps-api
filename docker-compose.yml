@@ -1,25 +1,57 @@
+# Production stack — self-hosted Organized fork
+#
+# Topology: Caddy (TLS + reverse proxy, same-origin) -> api (single process) -> disk volume.
+# The client is a static build (from the organized-app repo) served by Caddy directly
+# from ./client-dist (no separate container) — see SELF_HOSTING.md for building it.
+#
+# HARD CONSTRAINT (see PROJECT.md §10): the api service MUST remain single-process.
+# The identity/session/recovery-code stores use in-process locking (withLock) for
+# single-use and atomicity guarantees. Adding replicas, a process manager in cluster
+# mode (PM2 -i), or `docker compose up --scale api=2` WILL silently break single-use
+# token/recovery-code semantics (double-consumption, lost updates) with NO error at
+# runtime. Do not scale this service. If you need horizontal scaling, the identity
+# store must first move to a process-safe atomic primitive (flock across processes,
+# or Postgres `DELETE ... RETURNING`) — this is a re-architecture, not a config change.
+
 services:
-  # HARD CONSTRAINT: run the API as a SINGLE process/instance.
-  # Single-use guarantees (email login tokens, MFA recovery codes) and the
-  # identity index/credential writes are made atomic by an IN-PROCESS lock
-  # (src/v3/services/identity/lock.ts). saveObject is atomic per write, but a
-  # read-modify-write *sequence* is NOT serialized across processes — so two
-  # instances could double-consume a one-time token/recovery code or lose an
-  # index update. Therefore: do NOT add `deploy.replicas`, `docker compose
-  # --scale api=N`, or a PM2/cluster CMD. Scaling out first requires moving these
-  # stores to a process-safe atomic primitive (flock, or Postgres DELETE ...
-  # RETURNING). See PROJECT.md §10.
   api:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
+    # DO NOT set `deploy.replicas` > 1. DO NOT run under PM2 cluster mode.
     environment:
       - NODE_ENV=production
       - STORAGE_PATH=/data/storage
-      - SEC_ENCRYPT_KEY=${SEC_ENCRYPT_KEY}
+      - SEC_ENCRYPT_KEY=${SEC_ENCRYPT_KEY:?SEC_ENCRYPT_KEY must be set — see .env.example}
+      - AUTH_JWT_PRIVATE_KEY=${AUTH_JWT_PRIVATE_KEY:?see .env.example}
+      - AUTH_JWT_PUBLIC_KEY=${AUTH_JWT_PUBLIC_KEY:?see .env.example}
+      - SELF_HOSTED=true
+      # Same-origin behind Caddy -> SameSite=Lax is safe and adds CSRF defence
+      # (audit §10 #4). Verified: cookieOptions reads COOKIE_SAMESITE (utils/app.ts).
+      - COOKIE_SAMESITE=lax
+      # Canonical client URL used to build passwordless login-email links.
+      - APP_ORIGIN=https://${DOMAIN}
+      - MINIMUM_APP_VERSION=${MINIMUM_APP_VERSION:-1.0.0}
+      # Email (optional; passwordless login links). MAIL_HOST is REQUIRED when
+      # MAIL_ENABLED=true — any SMTP provider, no Gmail/Google default (fails loud).
+      - MAIL_ENABLED=${MAIL_ENABLED:-false}
+      - MAIL_HOST=${MAIL_HOST:-}
+      - MAIL_PORT=${MAIL_PORT:-587}
+      - MAIL_ADDRESS=${MAIL_ADDRESS:-}
+      - MAIL_PASSWORD=${MAIL_PASSWORD:-}
+      - MAIL_SENDER_NAME=${MAIL_SENDER_NAME:-Organized}
     volumes:
       - organized_data:/data/storage
     expose:
       - "8000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - internal
 
   caddy:
     image: caddy:2-alpine
@@ -29,10 +61,44 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./client-dist:/srv/client:ro
       - caddy_data:/data
       - caddy_config:/config
+    depends_on:
+      - api
+    networks:
+      - internal
+
+  # --- Backup sidecar: encrypts + pushes the storage volume off-box on a schedule.
+  # See BACKUP.md for the (mandatory) restore drill. This container has NO access to
+  # the api's decryption keys — it only tars + client-side-encrypts the already-
+  # AES-encrypted blob files with a DIFFERENT key (age), so a leaked backup key alone
+  # reveals nothing, and a leaked SEC_ENCRYPT_KEY alone doesn't unlock backups.
+  backup:
+    build:
+      context: ./backup
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - BACKUP_ENCRYPTION_KEY=${BACKUP_ENCRYPTION_KEY:?age PUBLIC key — see .env.example}
+      - BACKUP_DESTINATION=${BACKUP_DESTINATION:?rclone remote path — see BACKUP.md}
+      - BACKUP_SCHEDULE_CRON=${BACKUP_SCHEDULE_CRON:-0 3 * * *}
+      # rclone remote credentials (entrypoint.sh renders rclone.conf from these).
+      - RCLONE_S3_PROVIDER=${RCLONE_S3_PROVIDER:-Other}
+      - RCLONE_ACCESS_KEY_ID=${RCLONE_ACCESS_KEY_ID:?see .env.example}
+      - RCLONE_SECRET_ACCESS_KEY=${RCLONE_SECRET_ACCESS_KEY:?see .env.example}
+      - RCLONE_ENDPOINT=${RCLONE_ENDPOINT:?see .env.example}
+      - RCLONE_REGION=${RCLONE_REGION:-auto}
+    volumes:
+      - organized_data:/data/storage:ro
+    networks:
+      - internal
 
 volumes:
   organized_data:
   caddy_data:
   caddy_config:
+
+networks:
+  internal:
+    driver: bridge
