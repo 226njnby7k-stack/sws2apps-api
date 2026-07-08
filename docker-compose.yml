@@ -1,4 +1,14 @@
 services:
+  # HARD CONSTRAINT: run the API as a SINGLE process/instance.
+  # Single-use guarantees (email login tokens, MFA recovery codes) and the
+  # identity index/credential writes are made atomic by an IN-PROCESS lock
+  # (src/v3/services/identity/lock.ts). saveObject is atomic per write, but a
+  # read-modify-write *sequence* is NOT serialized across processes — so two
+  # instances could double-consume a one-time token/recovery code or lose an
+  # index update. Therefore: do NOT add `deploy.replicas`, `docker compose
+  # --scale api=N`, or a PM2/cluster CMD. Scaling out first requires moving these
+  # stores to a process-safe atomic primitive (flock, or Postgres DELETE ...
+  # RETURNING). See PROJECT.md §10.
   api:
     build: .
     restart: unless-stopped
