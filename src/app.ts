@@ -91,7 +91,16 @@ app.use((req, res, next) => {
 	}
 
 	res.header('Access-Control-Allow-Methods', 'GET,PUT,POST,PATCH,DELETE,OPTIONS');
-	res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+	// Reflect the client's requested headers (matches the behaviour of the cors()
+	// package this replaced). The client sends custom headers — appclient,
+	// appversion, language, metadata — beyond Content-Type/Authorization; a
+	// credentialed request (Allow-Credentials:true) requires every one of them to
+	// be listed here explicitly (the '*' wildcard is invalid with credentials), or
+	// the browser blocks the request at preflight.
+	res.header(
+		'Access-Control-Allow-Headers',
+		req.headers['access-control-request-headers'] || 'Content-Type, Authorization, appclient, appversion, language, metadata'
+	);
 	res.header('Access-Control-Max-Age', '86400');
 
 	if (req.method === 'OPTIONS') {
