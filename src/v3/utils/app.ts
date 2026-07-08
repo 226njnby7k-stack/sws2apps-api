@@ -9,11 +9,19 @@ const isLocalRequest = (req: Request) => {
 export const cookieOptions = (req: Request): CookieOptions => {
 	const isLocalHost = isLocalRequest(req);
 
+	// COOKIE_SAMESITE lets the deployment pin the session cookie's SameSite. A
+	// same-origin self-hosted deploy (client + API behind one Caddy domain) should
+	// set 'lax' for CSRF defence-in-depth (audit §10 finding #4); the cross-site
+	// SaaS setup needs 'none'. Falls back to the host-based default. 'none' requires
+	// Secure, so force it there; localhost (no TLS) stays insecure otherwise.
+	const configured = process.env.COOKIE_SAMESITE as 'lax' | 'strict' | 'none' | undefined;
+	const sameSite = configured ?? (isLocalHost ? 'lax' : 'none');
+
 	return {
 		httpOnly: true,
 		signed: true,
-		secure: isLocalHost ? !isLocalHost : true,
-		sameSite: isLocalHost ? 'lax' : 'none',
+		secure: sameSite === 'none' ? true : !isLocalHost,
+		sameSite,
 		maxAge: 400 * 24 * 60 * 60 * 1000,
 	};
 };

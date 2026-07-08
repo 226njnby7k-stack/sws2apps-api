@@ -8,10 +8,21 @@ import hbs, {
 import { LogLevel } from '@logtail/types';
 import { logger } from '../services/logger/logger.js';
 
+const MAIL_ENABLED = process.env.MAIL_ENABLED === 'true';
 const MAIL_ADDRESS = process.env.MAIL_ADDRESS!;
 const MAIL_SENDER_NAME =
   process.env.MAIL_SENDER_NAME! + ' <' + MAIL_ADDRESS + '>';
 const MAIL_PASSWORD = process.env.MAIL_PASSWORD!;
+const MAIL_HOST = process.env.MAIL_HOST;
+const MAIL_PORT = process.env.MAIL_PORT ? Number(process.env.MAIL_PORT) : 587;
+
+// NO Google fallback (PROJECT.md §2 / M6): when mail is enabled, an explicit SMTP
+// host is REQUIRED. Fail loudly at boot — exactly like SEC_ENCRYPT_KEY — rather
+// than silently routing login emails through Gmail's servers. When mail is
+// disabled the transport is built but never used (sends are gated on MAIL_ENABLED).
+if (MAIL_ENABLED && !MAIL_HOST) {
+  throw new Error('MAIL_ENABLED=true requires MAIL_HOST (your SMTP server); there is no Gmail default. See .env.example.');
+}
 
 const handlebarsOptions: NodemailerExpressHandlebarsOptions = {
   viewEngine: {
@@ -21,14 +32,12 @@ const handlebarsOptions: NodemailerExpressHandlebarsOptions = {
   viewPath: path.resolve('./src/v3/views/'),
 };
 
+// Generic SMTP against any provider — no hardcoded service preset.
 const transportOptions: SMTPTransport.Options = {
-  service: 'gmail',
-  secure: true,
-  tls: { rejectUnauthorized: false },
-  auth: {
-    user: MAIL_ADDRESS,
-    pass: MAIL_PASSWORD,
-  },
+  host: MAIL_HOST,
+  port: MAIL_PORT,
+  secure: MAIL_PORT === 465, // 465 = implicit TLS; 587 = STARTTLS
+  auth: { user: MAIL_ADDRESS, pass: MAIL_PASSWORD },
 };
 
 const transporter = nodemailer.createTransport(transportOptions, {

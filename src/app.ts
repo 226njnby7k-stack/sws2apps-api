@@ -16,6 +16,7 @@ import { serverReadyChecker } from './v3/middleware/server_ready_checker.js';
 import routesV3 from './v3/routes/index.js';
 
 import { errorHandler, getRoot, invalidEndpointHandler } from './v3/controllers/app_controller.js';
+import { getHealth } from './v3/controllers/health_controller.js';
 import resources from './v3/config/i18n_config.js';
 
 // Origins allowed to make CREDENTIALED cross-origin (CORS) calls. This set is
@@ -68,6 +69,11 @@ app.use(favicon(path.join(__dirname, 'public', 'favicon.ico')));
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// Health check — mounted BEFORE the CORS / requestChecker / serverReadyChecker /
+// rate-limit middleware so the internal, header-less Compose probe reaches it and
+// it can report storage health even during startup. Not browser-facing.
+app.get('/health', getHealth);
 
 // Single authoritative CORS handler. This replaces the previous `cors()`
 // middleware, which short-circuited OPTIONS preflight and — in non-production —
