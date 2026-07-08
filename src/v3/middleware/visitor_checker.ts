@@ -78,8 +78,10 @@ export const visitorChecker = () => {
 					await user.updateSessionLastSeen(visitorid, req);
 					next();
 				} else {
-					// allow verify token to pass this middleware
-					if (req.path === '/verify-token') {
+					// allow the MFA-clearing endpoints (TOTP or recovery code) to pass
+					// this middleware for a stage-1 (pre-MFA) session; everything else
+					// stays behind the gate.
+					if (req.path === '/verify-token' || req.path === '/verify-recovery-code') {
 						next();
 					} else {
 						res.locals.type = 'warn';

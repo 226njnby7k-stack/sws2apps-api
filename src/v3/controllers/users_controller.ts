@@ -17,6 +17,7 @@ import { logger } from '../services/logger/logger.js';
 import { getUserRoles, saveUserBackupAsync } from '../services/api/users.js';
 import { updateIdentityPassword } from '../services/identity/store.js';
 import { hashPassword, isPasswordAcceptable } from '../services/identity/passwords.js';
+import { deleteRecoveryCodes } from '../services/identity/recovery.js';
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -172,6 +173,9 @@ export const disableUser2FA = async (req: Request, res: Response) => {
 
 	const user = UsersList.findById(id)!;
 	await user.disableMFA();
+	// Disabling MFA must invalidate the recovery codes too — they exist only as an
+	// MFA fallback, so leaving them behind would be a stray set of live backdoors.
+	await deleteRecoveryCodes(user.profile.auth_uid!);
 
 	res.locals.type = 'info';
 	res.locals.message = `the user disabled 2fa successfully`;
@@ -1032,6 +1036,7 @@ export const deleteUser = async (req: Request, res: Response) => {
 	const user = UsersList.findById(id)!;
 	const congId = user.profile.congregation?.id;
 
+	await deleteRecoveryCodes(user.profile.auth_uid!);
 	await UsersList.delete(id);
 
 	if (congId) {

@@ -105,6 +105,10 @@ export type UserAuthResponse = {
 	message?: string;
 	id: string;
 	custom_token?: string;
+	/** Present ONCE, at MFA enrollment: the plaintext recovery codes to save. */
+	recovery_codes?: string[];
+	/** Unused recovery codes left after a recovery-code login (client low-warning). */
+	recovery_codes_remaining?: number;
 	app_settings: {
 		user_settings: {
 			firstname: { value: string; updatedAt: string };
