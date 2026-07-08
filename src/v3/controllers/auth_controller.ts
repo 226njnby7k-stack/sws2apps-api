@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { Request, Response } from 'express';
 import { validationResult } from 'express-validator';
 import { generateTokenDev } from '../dev/setup.js';
@@ -8,6 +9,7 @@ import { CongregationsList } from '../classes/Congregations.js';
 import { formatError } from '../utils/format_log.js';
 import { decodeUserIdToken } from '../services/firebase/users.js';
 import { consumeEmailLoginToken, createEmailLoginToken, issueAccessToken } from '../services/identity/tokens.js';
+import { withLock } from '../services/identity/lock.js';
 import { findUidByEmail, getCredentials } from '../services/identity/store.js';
 import { verifyPassword } from '../services/identity/passwords.js';
 import { cookieOptions } from '../utils/app.js';
@@ -15,6 +17,20 @@ import { ROLE_MASTER_KEY } from '../constant/base.js';
 import { MailClient } from '../config/mail_config.js';
 
 const isDev = process.env.NODE_ENV === 'development';
+
+// Serializes the check-and-clear of the emailed OTP so two concurrent requests
+// can't both accept the same code (single-use, like consumeEmailLoginToken).
+// Coarse key = bounded lock map (see services/identity/lock.ts).
+const OTP_CONSUME_LOCK = 'identity/otp-consume';
+
+// Constant-time comparison for short equal-length secrets (the 6-digit OTP), so a
+// wrong code can't be recovered digit-by-digit via response timing.
+const constantTimeEquals = (a: string, b: string): boolean => {
+	const ab = Buffer.from(a);
+	const bb = Buffer.from(b);
+	if (ab.length !== bb.length) return false;
+	return crypto.timingSafeEqual(ab, bb);
+};
 
 // Origins we are willing to embed in an outgoing passwordless login email.
 // The request Origin header is attacker-controlled on an unauthenticated
@@ -379,39 +395,30 @@ export const verifyEmailToken = async (req: Request, res: Response) => {
 		return;
 	}
 
-	if (!authUser.profile.email_otp) {
+	// Validate AND consume the one-time OTP as a single atomic operation under a
+	// lock, so two concurrent requests can't both accept the same code (single-use,
+	// read-check-invalidate — same discipline as consumeEmailLoginToken). No pending
+	// OTP, wrong code, and expired code all return false and fall through to the
+	// same generic 403 below (no account-existence / validity oracle).
+	const otpAccepted = await withLock(OTP_CONSUME_LOCK, async () => {
+		const otp = authUser.profile.email_otp;
+		if (!otp) return false;
+		if (Date.now() > otp.expiredAt) return false;
+		if (!constantTimeEquals(otp.code, String(token))) return false;
+
+		// Consume it now, inside the lock, before any concurrent request re-reads it.
+		const profile = structuredClone(authUser.profile);
+		delete profile.email_otp;
+		await authUser.updateProfile(profile);
+		return true;
+	});
+
+	if (!otpAccepted) {
 		res.locals.type = 'warn';
-		res.locals.message = 'email token verify failed: no pending otp';
+		res.locals.message = 'email otp invalid or already used';
 		res.status(403).json({ message: 'error_auth_invalid-token' });
 		return;
 	}
-
-	if (authUser.profile.email_otp) {
-		let isInvalid = false;
-
-		const isExpired = Date.now() > authUser.profile.email_otp.expiredAt;
-
-		if (isExpired) {
-			isInvalid = true;
-		}
-
-		if (!isExpired && authUser.profile.email_otp.code !== String(token)) {
-			isInvalid = true;
-		}
-
-		if (isInvalid) {
-			res.locals.type = 'warn';
-			res.locals.message = 'email otp is invalid';
-			res.status(403).json({ message: 'error_auth_invalid-token' });
-			return;
-		}
-	}
-
-	const profile = structuredClone(authUser.profile);
-
-	delete profile.email_otp;
-
-	await authUser.updateProfile(profile);
 
 	const visitorid = req.signedCookies.visitorid || crypto.randomUUID();
 
