@@ -1,3 +1,5 @@
+// name kept for upstream-merge compatibility; contains self-hosted implementation, not Firebase
+
 import { FeatureFlag } from '../../definition/flag.js';
 import { Flag } from '../../classes/Flag.js';
 import { getFileFromStorage, uploadFileToStorage } from './storage_utils.js';

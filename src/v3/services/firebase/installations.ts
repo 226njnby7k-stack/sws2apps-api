@@ -1,3 +1,5 @@
+// name kept for upstream-merge compatibility; contains self-hosted implementation, not Firebase
+
 import { AppInstallation } from '../../definition/installations.js';
 import { getFileFromStorage, uploadFileToStorage } from './storage_utils.js';
 

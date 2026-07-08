@@ -1,3 +1,5 @@
+// name kept for upstream-merge compatibility; contains self-hosted implementation, not Firebase
+
 import { API_VAR } from '../../../index.js';
 import { getFileFromStorage, uploadFileToStorage } from './storage_utils.js';
 

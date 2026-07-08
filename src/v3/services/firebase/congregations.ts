@@ -1,3 +1,5 @@
+// name kept for upstream-merge compatibility; contains self-hosted implementation, not Firebase
+
 import randomstring from 'randomstring';
 import { LogLevel } from '@logtail/types';
 import { StandardRecord } from '../../definition/app.js';

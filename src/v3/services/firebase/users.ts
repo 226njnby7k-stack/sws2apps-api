@@ -1,3 +1,5 @@
+// name kept for upstream-merge compatibility; contains self-hosted implementation, not Firebase
+
 import { LogLevel } from '@logtail/types';
 import { StandardRecord } from '../../definition/app.js';
 import { PocketNewParams, UserNewParams, UserProfile, UserSession, UserSettings } from '../../definition/user.js';

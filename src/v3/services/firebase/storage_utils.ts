@@ -1,3 +1,5 @@
+// name kept for upstream-merge compatibility; contains self-hosted implementation, not Firebase
+
 /**
  * storage_utils.ts — self-hosted fork.
  *
